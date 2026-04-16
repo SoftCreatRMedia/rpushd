@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: rpushd
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-targets
+
+      - name: Run cargo check
+        run: cargo check
+
+  release-assets:
+    name: Build Release Assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: validate
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            archive_suffix: linux-x86_64-gnu
+          - target: x86_64-unknown-linux-musl
+            archive_suffix: linux-x86_64-musl
+          - target: aarch64-unknown-linux-gnu
+            archive_suffix: linux-aarch64-gnu
+          - target: aarch64-unknown-linux-musl
+            archive_suffix: linux-aarch64-musl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: swatinem/rust-cache@v2
+
+      - name: Install cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build release binary
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Package release asset
+        run: |
+          mkdir -p dist/${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}
+          cp target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} dist/${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}/
+          cp README.md nginx-location.conf rpushd.service dist/${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}/
+          tar -C dist -czf dist/${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}.tar.gz ${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}
+          (
+            cd dist
+            sha256sum ${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}.tar.gz > ${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}.tar.gz.sha256
+          )
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}.tar.gz
+            dist/${{ env.BINARY_NAME }}-${{ matrix.archive_suffix }}.tar.gz.sha256

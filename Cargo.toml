@@ -1,0 +1,23 @@
+[package]
+name = "rpushd"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+async-stream = "0.3"
+axum = { version = "0.8", features = ["http1", "http2", "json", "tokio"] }
+base64 = "0.22"
+bytes = "1"
+dashmap = "6"
+hmac = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+subtle = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
