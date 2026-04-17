@@ -630,7 +630,7 @@ fn is_valid_channel(channel: &str) -> bool {
     !channel.is_empty()
         && channel.len() <= 191
         && channel.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, ':' | '-' | '_')
+            character.is_ascii_alphanumeric() || matches!(character, ':' | '-' | '_' | '.')
         })
 }
 
