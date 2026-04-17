@@ -1,73 +1,100 @@
 # rpushd
 
-This service is a reusable realtime push backend for application integrations.
+`rpushd` is a reusable realtime push daemon for application integrations.
 
-It keeps long-lived HTTP stream connections outside PHP-FPM and accepts lightweight
-publish events from application code.
+It keeps long-lived HTTP stream connections outside PHP-FPM and accepts
+lightweight publish events from trusted application code.
 
-## Prerequisites
+## What It Does
 
-The daemon is intended for Linux servers where you can run an additional service
-next to PHP-FPM. It is not meant for shared hosting.
+- accepts signed browser subscriptions for named channels
+- accepts authenticated publish requests from trusted server-side code
+- streams framed realtime messages to subscribed clients
+- exposes health and internal statistics endpoints
+
+## Requirements
+
+`rpushd` is intended for Linux systems where you can run an additional long-lived
+service next to your application stack.
 
 Required:
 
-- A modern Linux distribution
-- An application that publishes events to the daemon and mints signed subscribe tokens
-- nginx, Apache 2.4, HAProxy, or another reverse proxy in front of the daemon
-- A public URL that browsers can reach for the push daemon
+- a modern Linux distribution
+- an application that:
+  - publishes events to `rpushd`
+  - mints signed subscribe tokens for browser clients
+- a reverse proxy in front of the daemon
+  - nginx
+  - Apache 2.4
+  - HAProxy
+  - or an equivalent proxy
+- a browser-facing public URL for the stream endpoint
 
 Recommended:
 
-- systemd for service management
+- `systemd` for service management
 
-The included service file targets `systemd`, but the daemon itself is not tied to a
-specific distribution. It should work on other Linux distributions as long as you can
-run the binary as a long-lived service and expose it through a reverse proxy.
+## Installation
 
-## Linux Installation
+Choose one of these installation paths:
 
-Precompiled release binaries are available through GitHub Releases as `.tar.gz`
-archives. Current target variants:
+1. install from a precompiled release archive
+2. build from source
+
+### Install From A Precompiled Release Archive
+
+Release archives are published on GitHub Releases.
+
+Each archive already contains:
+
+- `rpushd`
+- `rpushd.service`
+- `nginx-location.conf`
+- `README.md`
+
+Current release variants:
 
 - `rpushd-linux-x86_64-gnu.tar.gz`
-  - use for `x86_64` Ubuntu, Debian, Arch, and other glibc-based Linux distributions
+  - for `x86_64` Ubuntu, Debian, Arch, and other glibc-based Linux distributions
 - `rpushd-linux-x86_64-musl.tar.gz`
-  - use for `x86_64` Alpine Linux
+  - for `x86_64` Alpine Linux
 - `rpushd-linux-aarch64-gnu.tar.gz`
-  - use for `aarch64` / `arm64` Ubuntu, Debian, and other glibc-based Linux distributions
+  - for `aarch64` / `arm64` Ubuntu, Debian, and other glibc-based Linux distributions
 - `rpushd-linux-aarch64-musl.tar.gz`
-  - use for `aarch64` / `arm64` Alpine Linux
+  - for `aarch64` / `arm64` Alpine Linux
 
-If you use a release archive, unpack it and continue with the deployment and reverse
-proxy steps below. If no suitable precompiled binary exists for your platform, build
-from source as described here.
-
-Typical installation from a release archive:
+Example installation:
 
 ```bash
 curl -LO https://github.com/SoftCreatRMedia/rpushd/releases/latest/download/rpushd-linux-x86_64-gnu.tar.gz
 curl -LO https://github.com/SoftCreatRMedia/rpushd/releases/latest/download/rpushd-linux-x86_64-gnu.tar.gz.sha256
 sha256sum -c rpushd-linux-x86_64-gnu.tar.gz.sha256
 tar -xzf rpushd-linux-x86_64-gnu.tar.gz
+
 mkdir -p /opt/rpushd
 cp rpushd-linux-x86_64-gnu/rpushd /opt/rpushd/rpushd
 cp rpushd-linux-x86_64-gnu/rpushd.service /opt/rpushd/
 cp rpushd-linux-x86_64-gnu/nginx-location.conf /opt/rpushd/
 cp rpushd-linux-x86_64-gnu/README.md /opt/rpushd/
+
+cd /opt/rpushd
 ```
 
-Replace `rpushd-linux-x86_64-gnu.tar.gz` with the archive that matches
-your platform.
+Replace `rpushd-linux-x86_64-gnu.tar.gz` with the archive that matches your
+platform.
 
-Clone the repository and enter the working directory:
+After that, continue with `Configuration`, `Service Setup`, and `Reverse Proxy`.
+
+### Build From Source
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/SoftCreatRMedia/rpushd.git
 cd rpushd
 ```
 
-Install the Rust toolchain and basic build dependencies.
+Install a Rust toolchain and basic build dependencies.
 
 Ubuntu / Debian:
 
@@ -80,7 +107,7 @@ rustup default stable
 rustup component add rustfmt
 ```
 
-Alpine Linux:
+Alpine:
 
 ```bash
 apk add --no-cache alpine-sdk pkgconf curl ca-certificates rustup
@@ -90,7 +117,7 @@ rustup default stable
 rustup component add rustfmt
 ```
 
-Arch Linux:
+Arch:
 
 ```bash
 pacman -Sy --needed base-devel pkgconf curl ca-certificates rustup
@@ -98,91 +125,159 @@ rustup default stable
 rustup component add rustfmt
 ```
 
-If your distribution already provides a sufficiently recent Rust toolchain, you can
-use that instead. `rustup` is recommended because it keeps the build process
-consistent across distributions.
-
-Build the daemon:
+Build:
 
 ```bash
 . "$HOME/.cargo/env"
 cargo build --release
 ```
 
-Deploy the binary and supporting files:
+Deploy the built files:
 
 ```bash
 mkdir -p /opt/rpushd
 cp target/release/rpushd /opt/rpushd/rpushd
 cp rpushd.service /opt/rpushd/
 cp nginx-location.conf /opt/rpushd/
+cp README.md /opt/rpushd/
+
+cd /opt/rpushd
 ```
 
-Generate two long random secrets:
+After that, continue with `Configuration`, `Service Setup`, and `Reverse Proxy`.
 
-- one for signed browser subscribe tokens
-- one for privileged server-side publish requests
+## Configuration
 
-Those values must match:
+`rpushd` uses two different secrets:
 
 - `RPUSHD_SECRET`
+  - used to verify signed browser subscribe tokens
 - `RPUSHD_PUBLISH_SECRET`
+  - used to authenticate privileged publish and stats requests
+
+Optional environment variables:
+
+- `RPUSHD_LISTEN`
+  - default: `127.0.0.1:45831`
+- `RPUSHD_HEARTBEAT_SECS`
+  - default: `15`
+- `RPUSHD_CHANNEL_IDLE_TTL_SECS`
+  - default: `3600`
+
+Generate strong random secrets before starting the daemon.
+
+Tip:
+
+- if Python 3 is available, this works on Linux, macOS, and Windows:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(64))"
+```
+
+- run it twice and use different values for:
+  - `RPUSHD_SECRET`
+  - `RPUSHD_PUBLISH_SECRET`
 
 Recommended:
 
-- store them in a root-readable only environment file instead of hardcoding them
-  into the unit itself
-- rotate them occasionally
-- treat the publish secret as especially sensitive because it authorizes event injection
+- keep the daemon bound to `127.0.0.1` or another private interface
+- store secrets in a dedicated environment file instead of hardcoding them into
+  the unit file
+- treat `RPUSHD_PUBLISH_SECRET` as especially sensitive because it authorizes
+  event injection
 
-Install and adjust the unit:
-
-```bash
-cp rpushd.service /etc/systemd/system/rpushd.service
-editor /etc/systemd/system/rpushd.service
-systemctl daemon-reload
-systemctl enable --now rpushd
-systemctl status rpushd
-```
-
-If your distribution does not use `systemd`, use the same binary and environment
-variables with the native service manager for that platform instead.
-
-The shipped `systemd` unit already includes a hardened baseline. If you prefer
-separate secret storage, replace the inline `Environment=` lines with something like:
-
-```ini
-EnvironmentFile=/etc/rpushd.env
-```
-
-and store the secrets there with restrictive permissions, for example:
+Example environment file:
 
 ```bash
 install -m 600 -o root -g root /dev/null /etc/rpushd.env
 editor /etc/rpushd.env
 ```
 
-Expose the daemon through nginx:
+Example `/etc/rpushd.env` contents:
+
+```ini
+RPUSHD_LISTEN=127.0.0.1:45831
+RPUSHD_SECRET=replace-with-a-long-random-secret
+RPUSHD_PUBLISH_SECRET=replace-with-a-different-long-random-secret
+RPUSHD_HEARTBEAT_SECS=15
+RPUSHD_CHANNEL_IDLE_TTL_SECS=3600
+```
+
+## Service Setup
+
+The repository ships a hardened `systemd` unit.
+
+Install it:
+
+```bash
+cp /opt/rpushd/rpushd.service /etc/systemd/system/rpushd.service
+editor /etc/systemd/system/rpushd.service
+```
+
+Replace the inline `Environment=` lines with:
+
+```ini
+EnvironmentFile=/etc/rpushd.env
+```
+
+Then enable and start the service:
+
+```bash
+systemctl daemon-reload
+systemctl enable --now rpushd
+systemctl status rpushd
+```
+
+If your system does not use `systemd`, run the same binary with the same
+environment variables through your native service manager.
+
+## Reverse Proxy
+
+Only expose these endpoints publicly:
+
+- `/healthz`
+- `/api/stream/`
+
+Do not expose these endpoints publicly:
+
+- `/api/publish`
+- `/api/stats`
+
+Trusted application code or internal admin tooling should call those endpoints
+directly through the internal daemon address, for example:
+
+- `http://127.0.0.1:45831/api/publish`
+- `http://127.0.0.1:45831/api/stats`
+
+### nginx
+
+Install the shipped snippet:
 
 ```bash
 mkdir -p /etc/nginx/snippets
-cp nginx-location.conf /etc/nginx/snippets/rpushd.conf
+cp /opt/rpushd/nginx-location.conf /etc/nginx/snippets/rpushd.conf
 editor /etc/nginx/sites-enabled/your-site.conf
-nginx -t
-systemctl reload nginx
 ```
 
-Inside the relevant nginx `server { ... }` block, add:
+Inside the relevant `server { ... }` block, add:
 
 ```nginx
 include snippets/rpushd.conf;
 ```
 
-This keeps the daemon routing in a dedicated snippet, so future updates only need
-to replace `/etc/nginx/snippets/rpushd.conf` instead of manually
-copying directives into every virtual host configuration.
+Validate and reload:
 
-Apache 2.4 works as well. Enable the required modules first:
+```bash
+nginx -t
+systemctl reload nginx
+```
+
+The shipped nginx snippet intentionally documents rate limiting and only exposes
+the public stream and health endpoints.
+
+### Apache 2.4
+
+Enable the required modules:
 
 ```bash
 a2enmod proxy proxy_http headers ssl
@@ -208,11 +303,11 @@ ProxyPassReverse /push-daemon/api/stream/ http://127.0.0.1:45831/api/stream/
 </Location>
 ```
 
-Keep `/api/publish` and `/api/stats` internal-only there as well. Trusted
-application or admin tooling should call those endpoints directly via the internal
-daemon URL instead of exposing them through Apache.
+Keep `/api/publish` and `/api/stats` internal-only here as well.
 
-HAProxy works as well. A typical frontend/backend split looks like this:
+### HAProxy
+
+A typical frontend/backend split looks like this:
 
 ```haproxy
 frontend https_in
@@ -231,75 +326,31 @@ backend push_daemon
     server local_push 127.0.0.1:45831 check
 ```
 
-Expose only the public stream and health paths through that public HAProxy route.
-Do not proxy `/api/publish` or `/api/stats` publicly. Let trusted application or
-admin tooling call those endpoints directly through the internal daemon URL instead.
+Again, expose only the public stream and health paths.
 
-Then configure your application so that:
+## Application Integration
 
-- browsers use the public stream base URL, for example `https://your-domain.tld/push-daemon`
-- server-side publish requests target the internal daemon URL, for example `http://127.0.0.1:45831`
+Your application should be configured so that:
+
+- browsers use the public stream base URL
+  - for example: `https://your-domain.tld/push-daemon`
+- privileged publish requests target the internal daemon URL
+  - for example: `http://127.0.0.1:45831`
 - subscribe tokens are signed with `RPUSHD_SECRET`
-- privileged publish requests use `RPUSHD_PUBLISH_SECRET`
-
-If you want runtime statistics, query the daemon directly on the internal address.
-Do not expose the stats endpoint publicly.
-
-## Operational Security
-
-For a strong production setup, keep these points in mind:
-
-- bind the daemon only to `127.0.0.1` or another private interface
-- never expose the raw daemon port directly to the internet
-- proxy only `/healthz` and `/api/stream/` publicly
-- keep `/api/publish` and `/api/stats` internal-only
-- call `/api/publish` only from trusted application code
-- call `/api/stats` only from trusted internal admin tooling
-- store secrets outside the service unit if possible
-- rotate secrets with a planned deployment window
-
-Suggested rotation order:
-
-1. rotate the publish secret
-2. update the application publish side
-3. verify publishing still works
-4. rotate the subscription secret
-5. allow old subscribe tokens to expire
-
-If publish traffic ever has to cross hosts, prefer a private network, VPN, IP
-allowlisting, or mTLS in front of the daemon rather than exposing publish traffic
-openly on the public internet.
-
-## Build
-
-```bash
-cargo build --release
-```
-
-## Run
-
-```bash
-export RPUSHD_SECRET='replace-with-a-long-random-secret'
-export RPUSHD_PUBLISH_SECRET='replace-with-a-different-long-random-secret'
-export RPUSHD_LISTEN='127.0.0.1:45831'
-cargo run --release
-```
-
-Optional environment variables:
-
-- `RPUSHD_HEARTBEAT_SECS`
-  Default: `15`
-- `RPUSHD_CHANNEL_IDLE_TTL_SECS`
-  Default: `3600`
+- privileged publish and stats requests use `RPUSHD_PUBLISH_SECRET`
 
 ## HTTP API
+
+Available endpoints:
 
 - `GET /healthz`
 - `POST /api/publish`
 - `GET /api/stats`
 - `POST /api/stream/{channel}`
 
-`/api/publish` expects:
+### `POST /api/publish`
+
+Request body:
 
 ```json
 {
@@ -310,13 +361,15 @@ Optional environment variables:
 }
 ```
 
-with header:
+Required header:
 
 ```text
 Authorization: Bearer <publish-secret>
 ```
 
-`/api/stream/{channel}` expects:
+### `POST /api/stream/{channel}`
+
+Request body:
 
 ```json
 {
@@ -324,35 +377,24 @@ Authorization: Bearer <publish-secret>
 }
 ```
 
-The response is an `application/octet-stream` body using the same two-byte
-big-endian length prefix that the browser-side `PushClient` already understands.
-Zero-length frames are heartbeats.
+The response is an `application/octet-stream` body using a two-byte big-endian
+length prefix. Zero-length frames are heartbeats.
 
-`/api/stats` expects:
+### `GET /api/stats`
+
+Required header:
 
 ```text
 Authorization: Bearer <publish-secret>
 ```
 
-Without a `mode` parameter, it returns human-readable plain text.
-
 Supported output modes:
 
-- default / no `mode`: plain text
+- no `mode` parameter: plain text
 - `?mode=json`
 - `?mode=xml`
 
-It includes metrics such as:
-
-- uptime
-- active stream connections
-- total stream connections opened
-- publish request count
-- published byte count
-- current RSS memory usage
-- channel count and per-channel subscriber counts
-
-Example:
+Example plain text request:
 
 ```bash
 curl -sS \
@@ -360,7 +402,7 @@ curl -sS \
   http://127.0.0.1:45831/api/stats
 ```
 
-Example plain-text response:
+Example plain text response:
 
 ```text
 started_at: 1776181200
@@ -385,7 +427,7 @@ channels:
     idle_seconds: 0
 ```
 
-JSON:
+Example JSON request:
 
 ```bash
 curl -sS \
@@ -427,7 +469,7 @@ Example JSON response:
 }
 ```
 
-XML:
+Example XML request:
 
 ```bash
 curl -sS \
@@ -469,52 +511,52 @@ Example XML response:
 </stats>
 ```
 
-## Reverse Proxy
-
-The browser-facing daemon URL should usually be exposed through nginx, Apache 2.4,
-HAProxy,
-or another reverse proxy. A minimal nginx location is included in
-[nginx-location.conf](./nginx-location.conf).
-It intentionally exposes only the public stream and health endpoints. Keep
-`/api/publish` and `/api/stats` internal-only and let trusted application or admin
-tooling call the daemon directly via the internal daemon URL. The recommended
-setup is to install that file as an nginx snippet and reference it from your
-`server` block via `include snippets/rpushd.conf;`.
-
-Typical setup:
-
-- the public stream base URL points to the browser-facing URL, usually `https://your-domain.tld/push-daemon`
-- privileged publish requests target the local daemon directly, for example `http://127.0.0.1:45831`
-
 ## Monitoring
+
+Useful operational checks:
+
+- `systemctl status rpushd`
+- `journalctl -u rpushd -f`
+- reverse-proxy access and error logs for `/push-daemon/`
+- `GET /api/stats` from trusted internal tooling
 
 At minimum, watch these signals:
 
 - active stream count
 - reconnect rate
 - publish request rate
-- `401`, `403`, and `429` responses at the proxy layer
 - daemon restarts or crashes
+- `401`, `403`, and `429` responses at the proxy layer
 
-Useful operational checks:
+## Operational Security
 
-- `systemctl status rpushd`
-- `journalctl -u rpushd -f`
-- reverse proxy access/error logs for `/push-daemon/`
+For a strong production setup:
 
-If you expect large traffic, set alerts for sudden reconnect spikes or sustained
-auth failures. Those often indicate proxy buffering/timeouts, abusive clients, or
-misconfigured secrets.
+- bind the daemon only to `127.0.0.1` or another private interface
+- never expose the raw daemon port directly to the internet
+- proxy only `/healthz` and `/api/stream/` publicly
+- keep `/api/publish` and `/api/stats` internal-only
+- call `/api/publish` only from trusted application code
+- call `/api/stats` only from trusted internal admin tooling
+- store secrets outside the service unit if possible
+- rotate secrets during a planned deployment window
 
-## systemd
+Suggested rotation order:
 
-A sample unit file is included in [rpushd.service](./rpushd.service).
+1. rotate the publish secret
+2. update the application publish side
+3. verify publish requests still work
+4. rotate the subscription secret
+5. allow old subscribe tokens to expire
+
+If publish traffic ever has to cross hosts, prefer a private network, VPN, IP
+allowlisting, or mTLS rather than exposing privileged daemon traffic publicly.
 
 ## Uninstall
 
-If the daemon is currently used by an application, disable that integration first.
+If an application currently uses `rpushd`, disable that integration first.
 
-Then remove the service and reverse proxy configuration:
+Then remove the service and reverse-proxy configuration:
 
 ```bash
 systemctl disable --now rpushd
@@ -527,10 +569,11 @@ nginx -t
 systemctl reload nginx
 ```
 
-Finally remove the deployed daemon files if you no longer need them:
+Finally remove the deployed files:
 
 ```bash
 rm -rf /opt/rpushd
+rm -f /etc/rpushd.env
 ```
 
 ## License
