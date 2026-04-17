@@ -52,6 +52,8 @@ const DEFAULT_CHANNEL_IDLE_TTL_SECS: u64 = 3600;
 const DEFAULT_HEARTBEAT_SECS: u64 = 15;
 const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:45831";
 const PUSH_DAEMON_AUDIENCE: &str = "rpushd";
+const REPOSITORY_URL: &str = "https://github.com/SoftCreatRMedia/rpushd";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Runtime configuration loaded from environment variables or created directly.
 #[derive(Clone)]
@@ -328,9 +330,12 @@ struct StatsResponse {
     memory_rss_bytes: Option<u64>,
     publish_requests_total: u64,
     published_bytes_total: u64,
+    retained_channels: usize,
+    repository_url: &'static str,
     started_at: u64,
     stream_connections_total: u64,
     uptime_seconds: u64,
+    version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -343,6 +348,7 @@ struct ChannelStatistics {
 #[derive(Deserialize)]
 struct StatsQuery {
     mode: Option<String>,
+    verbose: Option<String>,
 }
 
 fn build_router(state: AppState) -> Router {
@@ -387,26 +393,38 @@ async fn stats(
             .then_with(|| left.name.cmp(&right.name))
     });
 
+    let retained_channels = channels.len();
+    let active_channels = channels
+        .iter()
+        .filter(|channel| channel.subscribers > 0)
+        .count();
     let active_subscribers = channels.iter().map(|channel| channel.subscribers).sum();
 
     let response = StatsResponse {
-        active_channels: channels.len(),
+        active_channels,
         active_stream_connections: state
             .metrics
             .active_stream_connections
             .load(Ordering::Relaxed),
         active_subscribers,
         auth_failures_total: state.metrics.auth_failures_total.load(Ordering::Relaxed),
-        channels,
+        channels: if verbose_enabled(query.verbose.as_deref()) {
+            channels
+        } else {
+            Vec::new()
+        },
         memory_rss_bytes: read_memory_rss_bytes(),
         publish_requests_total: state.metrics.publish_requests_total.load(Ordering::Relaxed),
         published_bytes_total: state.metrics.published_bytes_total.load(Ordering::Relaxed),
+        retained_channels,
+        repository_url: REPOSITORY_URL,
         started_at: state.metrics.started_at,
         stream_connections_total: state
             .metrics
             .stream_connections_total
             .load(Ordering::Relaxed),
         uptime_seconds: now.saturating_sub(state.metrics.started_at),
+        version: VERSION,
     };
 
     render_stats_response(response, query.mode.as_deref())
@@ -590,7 +608,7 @@ fn verify_token(
         .decode(signature)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(secret.as_bytes())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     mac.update(signing_input.as_bytes());
     mac.verify_slice(&expected_signature)
@@ -715,9 +733,12 @@ fn build_binary_response(body: Vec<u8>, content_type: &str) -> Result<Response<B
 fn render_stats_text(response: &StatsResponse) -> String {
     let mut lines = vec![
         "rpushd stats".to_owned(),
+        format!("version: {}", response.version),
+        format!("repository: {}", response.repository_url),
         format!("started_at: {}", response.started_at),
         format!("uptime_seconds: {}", response.uptime_seconds),
         format!("active_channels: {}", response.active_channels),
+        format!("retained_channels: {}", response.retained_channels),
         format!(
             "active_stream_connections: {}",
             response.active_stream_connections
@@ -740,14 +761,18 @@ fn render_stats_text(response: &StatsResponse) -> String {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_owned())
         ),
-        "channels:".to_owned(),
     ];
 
-    for channel in &response.channels {
-        lines.push(format!(
-            "- {} | subscribers={} | idle_seconds={}",
-            channel.name, channel.subscribers, channel.idle_seconds
-        ));
+    if response.channels.is_empty() {
+        lines.push("channels: hidden (use ?verbose=1 to include channel details)".to_owned());
+    } else {
+        lines.push("channels:".to_owned());
+        for channel in &response.channels {
+            lines.push(format!(
+                "- {} | subscribers={} | idle_seconds={}",
+                channel.name, channel.subscribers, channel.idle_seconds
+            ));
+        }
     }
 
     lines.join("\n")
@@ -755,6 +780,8 @@ fn render_stats_text(response: &StatsResponse) -> String {
 
 fn render_stats_xml(response: &StatsResponse) -> String {
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<stats>");
+    append_xml_element(&mut xml, "version", response.version);
+    append_xml_element(&mut xml, "repositoryUrl", response.repository_url);
     append_xml_element(&mut xml, "startedAt", &response.started_at.to_string());
     append_xml_element(
         &mut xml,
@@ -765,6 +792,11 @@ fn render_stats_xml(response: &StatsResponse) -> String {
         &mut xml,
         "activeChannels",
         &response.active_channels.to_string(),
+    );
+    append_xml_element(
+        &mut xml,
+        "retainedChannels",
+        &response.retained_channels.to_string(),
     );
     append_xml_element(
         &mut xml,
@@ -834,4 +866,8 @@ fn escape_xml(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+}
+
+fn verbose_enabled(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "yes" | "on"))
 }

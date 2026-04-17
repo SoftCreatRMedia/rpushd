@@ -61,7 +61,7 @@ fn subscribe_token(channel: &str, secret: &str, expires_in_secs: u64) -> String 
         .unwrap(),
     );
     let signing_input = format!("{header}.{payload}");
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(signing_input.as_bytes());
     let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
 
@@ -238,7 +238,8 @@ async fn publish_requires_secret_and_updates_stats() {
     let stats_body: Value =
         serde_json::from_slice(&to_bytes(stats.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(stats_body["publish_requests_total"], 1);
-    assert_eq!(stats_body["active_channels"], 1);
+    assert_eq!(stats_body["active_channels"], 0);
+    assert_eq!(stats_body["retained_channels"], 1);
 }
 
 #[tokio::test]

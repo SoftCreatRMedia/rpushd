@@ -146,6 +146,87 @@ cd /opt/rpushd
 
 After that, continue with `Configuration`, `Service Setup`, and `Reverse Proxy`.
 
+## Updating
+
+Choose the update path that matches how you installed `rpushd`.
+
+### Update A Precompiled Release Install
+
+Download and verify the new archive, extract it, stop the service, replace the
+deployed files, then start the service again.
+
+Example:
+
+```bash
+cd /root
+
+curl -LO https://github.com/SoftCreatRMedia/rpushd/releases/latest/download/rpushd-linux-x86_64-gnu.tar.gz
+curl -LO https://github.com/SoftCreatRMedia/rpushd/releases/latest/download/rpushd-linux-x86_64-gnu.tar.gz.sha256
+sha256sum -c rpushd-linux-x86_64-gnu.tar.gz.sha256
+tar -xzf rpushd-linux-x86_64-gnu.tar.gz
+
+systemctl stop rpushd
+
+install -m 755 rpushd-linux-x86_64-gnu/rpushd /opt/rpushd/rpushd
+install -m 644 rpushd-linux-x86_64-gnu/rpushd.service /opt/rpushd/rpushd.service.dist
+install -m 644 rpushd-linux-x86_64-gnu/nginx-location.conf /opt/rpushd/nginx-location.conf.dist
+install -m 644 rpushd-linux-x86_64-gnu/README.md /opt/rpushd/README.md
+
+systemctl start rpushd
+systemctl status rpushd
+```
+
+Recommended after each update:
+
+- compare `/opt/rpushd/rpushd.service.dist` with your active `/etc/systemd/system/rpushd.service`
+- compare `/opt/rpushd/nginx-location.conf.dist` with your active `/etc/nginx/snippets/rpushd.conf`
+- merge relevant changes instead of overwriting local customizations blindly
+- if you changed the systemd unit, run:
+
+```bash
+systemctl daemon-reload
+systemctl restart rpushd
+```
+
+- if you changed the nginx snippet, run:
+
+```bash
+nginx -t
+systemctl reload nginx
+```
+
+Your `/etc/rpushd.env` file is not replaced by this process.
+
+### Update A Source Build Install
+
+Pull the new source, rebuild, stop the service, replace the deployed binary,
+then start the service again.
+
+Example:
+
+```bash
+cd /path/to/rpushd
+git pull --ff-only
+
+. "$HOME/.cargo/env"
+cargo build --release
+
+systemctl stop rpushd
+install -m 755 target/release/rpushd /opt/rpushd/rpushd
+install -m 644 rpushd.service /opt/rpushd/rpushd.service.dist
+install -m 644 nginx-location.conf /opt/rpushd/nginx-location.conf.dist
+install -m 644 README.md /opt/rpushd/README.md
+
+systemctl start rpushd
+systemctl status rpushd
+```
+
+The same review guidance applies here too:
+
+- compare the shipped `.dist` files with your active service and proxy config
+- merge changes intentionally
+- reload `systemd` or nginx only if you actually updated their active config files
+
 ## Configuration
 
 `rpushd` uses two different secrets:
@@ -393,6 +474,7 @@ Supported output modes:
 - no `mode` parameter: plain text
 - `?mode=json`
 - `?mode=xml`
+- add `?verbose=1` to include per-channel details
 
 Example plain text request:
 
@@ -405,9 +487,13 @@ curl -sS \
 Example plain text response:
 
 ```text
+rpushd stats
+version: 1.0.2
+repository: https://github.com/SoftCreatRMedia/rpushd
 started_at: 1776181200
 uptime_seconds: 842
 active_channels: 3
+retained_channels: 9
 active_subscribers: 7
 active_stream_connections: 7
 stream_connections_total: 24
@@ -415,17 +501,11 @@ publish_requests_total: 18
 published_bytes_total: 2914
 auth_failures_total: 0
 memory_rss_bytes: 7348224
-channels:
-  - name: notifications:96501
-    subscribers: 1
-    idle_seconds: 3
-  - name: thread-posts:459
-    subscribers: 3
-    idle_seconds: 1
-  - name: thread-writers:459
-    subscribers: 3
-    idle_seconds: 0
+channels: hidden (use ?verbose=1 to include channel details)
 ```
+
+By default, `/api/stats` only returns aggregate counts. Detailed channel
+listings are hidden unless `verbose` is enabled.
 
 Example JSON request:
 
@@ -443,30 +523,25 @@ Example JSON response:
   "active_stream_connections": 7,
   "active_subscribers": 7,
   "auth_failures_total": 0,
-  "channels": [
-    {
-      "idle_seconds": 3,
-      "name": "notifications:96501",
-      "subscribers": 1
-    },
-    {
-      "idle_seconds": 1,
-      "name": "thread-posts:459",
-      "subscribers": 3
-    },
-    {
-      "idle_seconds": 0,
-      "name": "thread-writers:459",
-      "subscribers": 3
-    }
-  ],
+  "channels": [],
   "memory_rss_bytes": 7348224,
   "publish_requests_total": 18,
   "published_bytes_total": 2914,
+  "repository_url": "https://github.com/SoftCreatRMedia/rpushd",
+  "retained_channels": 9,
   "started_at": 1776181200,
   "stream_connections_total": 24,
-  "uptime_seconds": 842
+  "uptime_seconds": 842,
+  "version": "1.0.2"
 }
+```
+
+Example verbose JSON request:
+
+```bash
+curl -sS \
+  -H 'Authorization: Bearer replace-with-the-publish-secret' \
+  'http://127.0.0.1:45831/api/stats?mode=json&verbose=1' | jq
 ```
 
 Example XML request:
@@ -481,34 +556,29 @@ Example XML response:
 
 ```xml
 <stats>
-  <started_at>1776181200</started_at>
-  <uptime_seconds>842</uptime_seconds>
-  <active_channels>3</active_channels>
-  <active_subscribers>7</active_subscribers>
-  <active_stream_connections>7</active_stream_connections>
-  <stream_connections_total>24</stream_connections_total>
-  <publish_requests_total>18</publish_requests_total>
-  <published_bytes_total>2914</published_bytes_total>
-  <auth_failures_total>0</auth_failures_total>
-  <memory_rss_bytes>7348224</memory_rss_bytes>
-  <channels>
-    <channel>
-      <name>notifications:96501</name>
-      <subscribers>1</subscribers>
-      <idle_seconds>3</idle_seconds>
-    </channel>
-    <channel>
-      <name>thread-posts:459</name>
-      <subscribers>3</subscribers>
-      <idle_seconds>1</idle_seconds>
-    </channel>
-    <channel>
-      <name>thread-writers:459</name>
-      <subscribers>3</subscribers>
-      <idle_seconds>0</idle_seconds>
-    </channel>
-  </channels>
+  <version>1.0.2</version>
+  <repositoryUrl>https://github.com/SoftCreatRMedia/rpushd</repositoryUrl>
+  <startedAt>1776181200</startedAt>
+  <uptimeSeconds>842</uptimeSeconds>
+  <activeChannels>3</activeChannels>
+  <retainedChannels>9</retainedChannels>
+  <activeSubscribers>7</activeSubscribers>
+  <activeStreamConnections>7</activeStreamConnections>
+  <streamConnectionsTotal>24</streamConnectionsTotal>
+  <publishRequestsTotal>18</publishRequestsTotal>
+  <publishedBytesTotal>2914</publishedBytesTotal>
+  <authFailuresTotal>0</authFailuresTotal>
+  <memoryRssBytes>7348224</memoryRssBytes>
+  <channels></channels>
 </stats>
+```
+
+Example verbose XML request:
+
+```bash
+curl -sS \
+  -H 'Authorization: Bearer replace-with-the-publish-secret' \
+  'http://127.0.0.1:45831/api/stats?mode=xml&verbose=1'
 ```
 
 ## Monitoring
