@@ -39,6 +39,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
+use socket2::{Domain, Protocol, Socket, Type};
 use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 use tokio::time::{self, MissedTickBehavior};
@@ -51,6 +52,7 @@ const CHANNEL_BUFFER_SIZE: usize = 512;
 const DEFAULT_CHANNEL_IDLE_TTL_SECS: u64 = 3600;
 const DEFAULT_HEARTBEAT_SECS: u64 = 15;
 const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:45831";
+const DEFAULT_LISTEN_BACKLOG: i32 = 16_384;
 const PUSH_DAEMON_AUDIENCE: &str = "rpushd";
 const REPOSITORY_URL: &str = "https://github.com/SoftCreatRMedia/rpushd";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -156,13 +158,33 @@ pub async fn run(configuration: Configuration) -> Result<(), String> {
     let app = build_router(state);
     info!("listening on {listen_address}");
 
-    let listener = tokio::net::TcpListener::bind(listen_address)
-        .await
+    let listener = create_listener(listen_address, DEFAULT_LISTEN_BACKLOG)
         .map_err(|error| format!("Failed to bind listener: {error}"))?;
 
     axum::serve(listener, app)
         .await
         .map_err(|error| format!("HTTP server terminated: {error}"))
+}
+
+fn create_listener(
+    listen_address: SocketAddr,
+    backlog: i32,
+) -> Result<tokio::net::TcpListener, std::io::Error> {
+    let domain = match listen_address {
+        SocketAddr::V4(_) => Domain::IPV4,
+        SocketAddr::V6(_) => Domain::IPV6,
+    };
+
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_nonblocking(true)?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+    socket.bind(&listen_address.into())?;
+    socket.listen(backlog)?;
+
+    let listener: std::net::TcpListener = socket.into();
+    tokio::net::TcpListener::from_std(listener)
 }
 
 #[derive(Clone)]
