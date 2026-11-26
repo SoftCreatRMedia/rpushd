@@ -520,7 +520,7 @@ Example plain text response:
 
 ```text
 rpushd stats
-version: 1.0.3
+version: 1.0.4
 repository: https://github.com/SoftCreatRMedia/rpushd
 started_at: 1776181200
 uptime_seconds: 842
@@ -580,7 +580,7 @@ Example JSON response:
   "started_at": 1776181200,
   "stream_connections_total": 24,
   "uptime_seconds": 842,
-  "version": "1.0.3"
+  "version": "1.0.4"
 }
 ```
 
@@ -604,7 +604,7 @@ Example XML response:
 
 ```xml
 <stats>
-  <version>1.0.3</version>
+  <version>1.0.4</version>
   <repositoryUrl>https://github.com/SoftCreatRMedia/rpushd</repositoryUrl>
   <startedAt>1776181200</startedAt>
   <uptimeSeconds>842</uptimeSeconds>
