@@ -69,6 +69,8 @@ Example installation:
 curl -LO https://github.com/SoftCreatRMedia/rpushd/releases/latest/download/rpushd-linux-x86_64-gnu.tar.gz
 curl -LO https://github.com/SoftCreatRMedia/rpushd/releases/latest/download/rpushd-linux-x86_64-gnu.tar.gz.sha256
 sha256sum -c rpushd-linux-x86_64-gnu.tar.gz.sha256
+# Optional build provenance verification for attested releases:
+# gh attestation verify rpushd-linux-x86_64-gnu.tar.gz -R SoftCreatRMedia/rpushd
 tar -xzf rpushd-linux-x86_64-gnu.tar.gz
 
 mkdir -p /opt/rpushd
@@ -129,7 +131,7 @@ Build:
 
 ```bash
 . "$HOME/.cargo/env"
-cargo build --release
+cargo build --locked --release
 ```
 
 Deploy the built files:
@@ -163,6 +165,8 @@ cd /root
 curl -LO https://github.com/SoftCreatRMedia/rpushd/releases/latest/download/rpushd-linux-x86_64-gnu.tar.gz
 curl -LO https://github.com/SoftCreatRMedia/rpushd/releases/latest/download/rpushd-linux-x86_64-gnu.tar.gz.sha256
 sha256sum -c rpushd-linux-x86_64-gnu.tar.gz.sha256
+# Optional build provenance verification for attested releases:
+# gh attestation verify rpushd-linux-x86_64-gnu.tar.gz -R SoftCreatRMedia/rpushd
 tar -xzf rpushd-linux-x86_64-gnu.tar.gz
 
 systemctl stop rpushd
@@ -195,7 +199,11 @@ nginx -t
 systemctl reload nginx
 ```
 
-Your `/etc/rpushd.env` file is not replaced by this process.
+If the active unit uses inline environment variables, move them to
+`/etc/rpushd.env` before switching to the shipped unit. Preserve both existing
+secrets so application publishers and subscription tokens continue to work. The
+new unit runs under a dedicated dynamic user, so ensure `/opt/rpushd` and the
+binary are accessible to it and adjust any existing sandbox overrides.
 
 ### Update A Source Build Install
 
@@ -209,7 +217,7 @@ cd /path/to/rpushd
 git pull --ff-only
 
 . "$HOME/.cargo/env"
-cargo build --release
+cargo build --locked --release
 
 systemctl stop rpushd
 install -m 755 target/release/rpushd /opt/rpushd/rpushd
@@ -241,11 +249,19 @@ Optional environment variables:
 - `RPUSHD_LISTEN`
   - default: `127.0.0.1:45831`
 - `RPUSHD_HEARTBEAT_SECS`
-  - default: `15`
-- `RPUSHD_CHANNEL_IDLE_TTL_SECS`
-  - default: `3600`
+  - defaults to 15 seconds and accepts 1–3600. Set proxy read timeouts above this interval.
+- `RPUSHD_MAX_STREAMS`
+  - maximum concurrent streams across the daemon, 4,096 by default
+- `RPUSHD_MAX_CHANNELS`
+  - maximum channels with live subscribers, 1,024 by default
+- `RPUSHD_MAX_BUFFERED_BYTES`
+  - shared byte budget for framed publish data queued or held by the HTTP server, 64 MiB by default
 
-Generate strong random secrets before starting the daemon.
+Channel state is released when the last subscriber disconnects.
+Existing deployments can remove the former `RPUSHD_CHANNEL_IDLE_TTL_SECS` setting.
+
+Generate strong random secrets before starting the daemon. Startup rejects
+empty secrets, the example placeholders, and identical secrets.
 
 Tip:
 
@@ -281,36 +297,31 @@ RPUSHD_LISTEN=127.0.0.1:45831
 RPUSHD_SECRET=replace-with-a-long-random-secret
 RPUSHD_PUBLISH_SECRET=replace-with-a-different-long-random-secret
 RPUSHD_HEARTBEAT_SECS=15
-RPUSHD_CHANNEL_IDLE_TTL_SECS=3600
+RPUSHD_MAX_STREAMS=4096
+RPUSHD_MAX_CHANNELS=1024
+RPUSHD_MAX_BUFFERED_BYTES=67108864
 ```
 
 ## Service Setup
 
 The repository ships a hardened `systemd` unit.
 
-Install it:
+Create `/etc/rpushd.env` using the settings above and replace both example
+secrets with independently generated values. Install the unit and start it:
 
 ```bash
 cp /opt/rpushd/rpushd.service /etc/systemd/system/rpushd.service
-editor /etc/systemd/system/rpushd.service
-```
-
-Replace the inline `Environment=` lines with:
-
-```ini
-EnvironmentFile=/etc/rpushd.env
-```
-
-Then enable and start the service:
-
-```bash
 systemctl daemon-reload
 systemctl enable --now rpushd
 systemctl status rpushd
 ```
 
-If your system does not use `systemd`, run the same binary with the same
-environment variables through your native service manager.
+The unit sets `LimitNOFILE=65536`. When tuning admission, budget for daemon
+sockets and other descriptors. An HTTP/1.1 reverse proxy also needs separate
+client and upstream sockets for each active stream. Tune its connection and
+descriptor limits accordingly. Run one daemon instance per listening address.
+For other service managers, configure the same environment variables and
+descriptor budget.
 
 ## Reverse Proxy
 
@@ -394,14 +405,19 @@ A typical frontend/backend split looks like this:
 frontend https_in
     bind *:443 ssl crt /etc/haproxy/certs alpn h2,http/1.1
     mode http
+    timeout client 75s
 
-    acl path_push_daemon path_beg /push-daemon/
-    use_backend push_daemon if path_push_daemon
+    acl push_health path /push-daemon/healthz
+    acl push_stream path_beg /push-daemon/api/stream/
+    use_backend push_daemon if push_health or push_stream
 
 backend push_daemon
     mode http
     option forwardfor
+    option httpchk GET /healthz
+    http-request set-path %[path,regsub(^/push-daemon/,/)]
     http-reuse safe
+    timeout connect 5s
     timeout server 75s
     timeout tunnel 75s
     server local_push 127.0.0.1:45831 check
@@ -448,6 +464,10 @@ Required header:
 Authorization: Bearer <publish-secret>
 ```
 
+A successful publish returns `204 No Content`, including when the channel has no
+subscribers. Events are live and have no replay. If the shared byte budget is
+exhausted, the daemon returns `503 Service Unavailable` for that publish.
+
 ### `POST /api/stream/{channel}`
 
 Request body:
@@ -460,6 +480,18 @@ Request body:
 
 The response is an `application/octet-stream` body using a two-byte big-endian
 length prefix. Zero-length frames are heartbeats.
+
+Tokens authorize delivery until their signed `exp` timestamp. The daemon closes
+the stream at expiry and returns `401 Unauthorized` if the client tries to reuse
+an expired token. Each channel buffers up to 512 frames. When a subscriber falls
+behind that buffer, the daemon closes the affected stream. If the stream or
+active channel limit has been reached, new subscriptions receive
+`503 Service Unavailable`.
+
+On any stream end, reconnect with backoff, jitter, and a fresh token. After the
+new stream opens, refresh state from the application and reconcile events that
+arrive during the refresh. Use the application's polling fallback during
+sustained overload.
 
 ### `GET /api/stats`
 
@@ -488,24 +520,34 @@ Example plain text response:
 
 ```text
 rpushd stats
-version: 1.0.2
+version: 1.0.3
 repository: https://github.com/SoftCreatRMedia/rpushd
 started_at: 1776181200
 uptime_seconds: 842
 active_channels: 3
-retained_channels: 9
+retained_channels: 3
 active_subscribers: 7
 active_stream_connections: 7
 stream_connections_total: 24
 publish_requests_total: 18
 published_bytes_total: 2914
 auth_failures_total: 0
+subscription_auth_failures_total: 0
+stream_admission_rejections_total: 0
+stream_lagged_total: 0
+lagged_events_total: 0
+publish_overload_total: 0
+channel_removals_total: 0
 memory_rss_bytes: 7348224
 channels: hidden (use ?verbose=1 to include channel details)
 ```
 
 By default, `/api/stats` only returns aggregate counts. Detailed channel
-listings are hidden unless `verbose` is enabled.
+listings are hidden unless `verbose` is enabled. `retained_channels` is
+retained for compatibility and now matches `active_channels`. Per-channel
+`idle_seconds` measures time since the last subscription or successful broadcast.
+`lagged_events_total` counts frames Tokio reports as overwritten when a
+subscriber falls behind.
 
 Example JSON request:
 
@@ -523,16 +565,22 @@ Example JSON response:
   "active_stream_connections": 7,
   "active_subscribers": 7,
   "auth_failures_total": 0,
+  "subscription_auth_failures_total": 0,
+  "stream_admission_rejections_total": 0,
+  "stream_lagged_total": 0,
+  "lagged_events_total": 0,
+  "publish_overload_total": 0,
+  "channel_removals_total": 0,
   "channels": [],
   "memory_rss_bytes": 7348224,
   "publish_requests_total": 18,
   "published_bytes_total": 2914,
   "repository_url": "https://github.com/SoftCreatRMedia/rpushd",
-  "retained_channels": 9,
+  "retained_channels": 3,
   "started_at": 1776181200,
   "stream_connections_total": 24,
   "uptime_seconds": 842,
-  "version": "1.0.2"
+  "version": "1.0.3"
 }
 ```
 
@@ -556,18 +604,24 @@ Example XML response:
 
 ```xml
 <stats>
-  <version>1.0.2</version>
+  <version>1.0.3</version>
   <repositoryUrl>https://github.com/SoftCreatRMedia/rpushd</repositoryUrl>
   <startedAt>1776181200</startedAt>
   <uptimeSeconds>842</uptimeSeconds>
   <activeChannels>3</activeChannels>
-  <retainedChannels>9</retainedChannels>
+  <retainedChannels>3</retainedChannels>
   <activeSubscribers>7</activeSubscribers>
   <activeStreamConnections>7</activeStreamConnections>
   <streamConnectionsTotal>24</streamConnectionsTotal>
   <publishRequestsTotal>18</publishRequestsTotal>
   <publishedBytesTotal>2914</publishedBytesTotal>
   <authFailuresTotal>0</authFailuresTotal>
+  <subscriptionAuthFailuresTotal>0</subscriptionAuthFailuresTotal>
+  <streamAdmissionRejectionsTotal>0</streamAdmissionRejectionsTotal>
+  <streamLaggedTotal>0</streamLaggedTotal>
+  <laggedEventsTotal>0</laggedEventsTotal>
+  <publishOverloadTotal>0</publishOverloadTotal>
+  <channelRemovalsTotal>0</channelRemovalsTotal>
   <memoryRssBytes>7348224</memoryRssBytes>
   <channels></channels>
 </stats>
@@ -593,10 +647,11 @@ Useful operational checks:
 At minimum, watch these signals:
 
 - active stream count
-- reconnect rate
+- reconnect rate and streams closed for lag
+- stream admission and publish overload counts
 - publish request rate
 - daemon restarts or crashes
-- `401`, `403`, and `429` responses at the proxy layer
+- `401`, `403`, `429`, and `503` responses at the proxy layer
 
 ## Operational Security
 

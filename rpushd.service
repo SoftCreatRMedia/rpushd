@@ -5,15 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=www-data
-Group=www-data
+DynamicUser=true
 WorkingDirectory=/opt/rpushd
-Environment=RPUSHD_LISTEN=127.0.0.1:45831
-Environment=RPUSHD_SECRET=replace-with-the-subscription-secret
-Environment=RPUSHD_PUBLISH_SECRET=replace-with-the-publish-secret
+EnvironmentFile=/etc/rpushd.env
 ExecStart=/opt/rpushd/rpushd
 Restart=always
 RestartSec=2
+LimitNOFILE=65536
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -26,7 +24,6 @@ ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallArchitectures=native
 MemoryDenyWriteExecute=true
-ReadWritePaths=/opt/rpushd
 
 [Install]
 WantedBy=multi-user.target
